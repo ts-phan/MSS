@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Calibrage VDF — Système Masse-Ressort</title>
+
+<!-- React + ReactDOM (production) -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+<!-- Recharts -->
+<script src="https://unpkg.com/prop-types@15/prop-types.min.js"></script>
+<script src="https://unpkg.com/recharts@2.10.3/umd/Recharts.js"></script>
+
+<!-- Babel standalone v7 -->
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+  body {
+    font-family: 'Inter', -apple-system, sans-serif;
+    background: #f0f2f5;
+    color: #1a1d20;
+    display: flex;
+    flex-direction: column;
+  }
+  
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+  input[type=range]::-webkit-slider-thumb {
+    appearance: none; width: 14px; height: 14px; border-radius: 50%;
+    background: #ff8c00; cursor: pointer; border: 2px solid #fff;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #ff8c00; cursor: pointer; border: 2px solid #fff;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  }
+  
+  #loading {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #8a93a3; background: #f3f5f8;
+  }
+  
+  .card {
+    background: #fff; border-radius: 8px; border: 1px solid #e1e4e8; padding: 16px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+  }
+  
+  .gemini-btn {
+    background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+    color: white; border: none; padding: 12px; border-radius: 8px;
+    font-weight: 600; cursor: pointer; width: 100%;
+    transition: opacity 0.2s; font-size: 13px;
+    box-shadow: 0 4px 12px rgba(168, 85, 247, 0.25);
+  }
+  .gemini-btn.secondary {
+    background: #fff; color: #6366f1; border: 1px solid #c7d2fe; box-shadow: none;
+  }
+  .gemini-btn.success {
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25);
+  }
+  .gemini-btn:hover { opacity: 0.9; }
+  .gemini-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .gemini-response {
+    background: #f8faff; border: 1px solid #c7d2fe; border-radius: 8px;
+    padding: 16px; font-size: 13px; line-height: 1.5; color: #1e1b4b; margin-top: 16px;
+  }
+
+  .ai-textarea {
+    width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #cbd5e1;
+    font-family: inherit; font-size: 13px; resize: vertical; min-height: 80px;
+    margin-top: 8px; background: #fff; box-sizing: border-box;
+  }
+  .ai-textarea:focus { outline: none; border-color: #a855f7; box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.2); }
+
+  .layout-header {
+    background: #1a1d20; color: #fff; padding: 16px 24px;
+    border-bottom: 4px solid #ff8c00; flex-shrink: 0; z-index: 10;
+  }
+  .layout-main { display: flex; flex: 1; overflow: hidden; }
+  .layout-sidebar {
+    width: 360px; background: #fff; border-right: 1px solid #e1e4e8;
+    padding: 20px; overflow-y: auto; flex-shrink: 0;
+  }
+  .layout-content {
+    flex: 1; padding: 24px; overflow-y: auto; background: #f0f2f5;
+  }
+  
+  .tab-btn {
+    padding: 10px 20px; font-weight: 600; font-size: 14px;
+    color: #64748b; background: transparent; border: none;
+    border-bottom: 3px solid transparent; cursor: pointer; transition: all 0.2s;
+  }
+  .tab-btn:hover { color: #1e293b; }
+  .tab-btn.active { color: #ff8c00; border-bottom: 3px solid #ff8c00; }
+  .tab-btn.ai-tab { color: #9333ea; }
+  .tab-btn.ai-tab.active { color: #7e22ce; border-bottom: 3px solid #9333ea; }
+  
+  .math-val { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: #0f172a; }
+  .math-lbl { font-size: 11.5px; color: #64748b; font-weight: 600; }
+
+  .md-content h1, .md-content h2, .md-content h3 { color: #312e81; margin-top: 16px; margin-bottom: 8px; }
+  .md-content p { margin-bottom: 12px; }
+  .md-content ul { padding-left: 20px; margin-bottom: 12px; }
+  .md-content li { margin-bottom: 4px; }
+  .md-content strong { color: #1e1b4b; }
+</style>
+</head>
+<body>
+
+<div id="root"><div id="loading">Initialisation du modèle mécanique...</div></div>
+
+<script type="text/babel" data-presets="react">
+
+const { useState, useMemo, useRef, useEffect } = React;
+const {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  ResponsiveContainer, ReferenceLine
+} = Recharts;
+
+// ─────────────────────────────────────────────────────────────────
+// API GEMINI (Texte et Audio)
+// ─────────────────────────────────────────────────────────────────
+const GEMINI_MODEL = "gemini-2.5-flash-preview-09-2025";
+const GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts";
+
+async function callGeminiAPI(apiKey, prompt, systemInstructionText, jsonSchema = null) {
+  if (!apiKey) return jsonSchema ? null : "⚠️ Erreur: Clé API manquante. Veuillez saisir votre clé Gemini dans le panneau latéral de gauche.";
+  
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    systemInstruction: { parts: [{ text: systemInstructionText }] }
+  };
+
+  if (jsonSchema) {
+    payload.generationConfig = {
+      responseMimeType: "application/json",
+      responseSchema: jsonSchema
+    };
+  }
+
+  const delays = [1000, 2000, 4000, 8000, 16000];
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const result = await response.json();
+      const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (jsonSchema && text) {
+        const cleanText = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+        return JSON.parse(cleanText);
+      }
+      return text || "Pas de réponse générée.";
+    } catch (error) {
+      if (attempt === 4) return jsonSchema ? null : "Erreur: Impossible de joindre l'expert IA pour le moment. Veuillez réessayer.";
+      await new Promise(res => setTimeout(res, delays[attempt]));
+    }
+  }
+}
+
+async function callGeminiTTS(apiKey, text, voiceName = "Aoede") {
+  if (!apiKey) return null;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TTS_MODEL}:generateContent?key=${apiKey}`;
+  const payload = {
+    contents: [{ parts: [{ text: text }] }],
+    generationConfig: {
+      responseModalities: ["AUDIO"],
+      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceName } } }
+    },
+    model: GEMINI_TTS_MODEL
+  };
+  
+  const delays = [1000, 2000, 4000, 8000, 16000];
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      if (!response.ok) throw new Error(`TTS HTTP error! status: ${response.status}`);
+      const result = await response.json();
+      return result.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+    } catch (error) {
+      if (attempt === 4) return null;
+      await new Promise(res => setTimeout(res, delays[attempt]));
+    }
+  }
+}
+
+// Convertisseur PCM -> WAV pour navigateur
+function pcmToWav(pcmData, sampleRate) {
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+  const blockAlign = numChannels * (bitsPerSample / 8);
+  const wavHeader = new ArrayBuffer(44);
+  const view = new DataView(wavHeader);
+
+  const writeString = (view, offset, string) => {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
+  };
+
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + pcmData.length, true);
+  writeString(view, 8, 'WAVE');
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeString(view, 36, 'data');
+  view.setUint32(40, pcmData.length, true);
+
+  const wavBytes = new Uint8Array(44 + pcmData.length);
+  wavBytes.set(new Uint8Array(wavHeader), 0);
+  wavBytes.set(pcmData, 44);
+  return wavBytes;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// MOTEUR PHYSIQUE ET MATHÉMATIQUES
+// ─────────────────────────────────────────────────────────────────
+function computeCurves(p) {
+  const {
+    vitesse, lambda_rugo,
+    M_ns, A_rail, rho_rail, m_traverse, a_RS,
+    k_pad, zeta_pad,
+    h_dalle, b_dalle, rho_beton, h_top, rho_top,
+    C_MSS, zeta_MSS
+  } = p;
+
+  const v_ms = vitesse / 3.6; 
+  const a_RS_m = a_RS / 1000; 
+  const lambda_m = lambda_rugo / 1000;
+  
+  const f_passage = v_ms / a_RS_m;     
+  const f_rugosite = v_ms / lambda_m;  
+
+  const m_rail = rho_rail * A_rail * a_RS;
+  const m1 = m_rail + m_traverse + M_ns; 
+  const m2_beton = rho_beton * h_dalle * b_dalle * a_RS;
+  const m2_top = rho_top * h_top * b_dalle * a_RS;
+  const m2 = m2_beton + m2_top;
+
+  const k1 = k_pad * 1000000;
+  const k2 = C_MSS * b_dalle * a_RS * 1000;
+
+  const c1 = 2 * zeta_pad * Math.sqrt(k1 * m1);
+  const c2 = 2 * zeta_MSS * Math.sqrt(k2 * m2);
+
+  const A_eq = m1 * m2;
+  const B_eq = -(m1 * k1 + m1 * k2 + m2 * k1);
+  const C_eq = k1 * k2;
+  const delta = B_eq * B_eq - 4 * A_eq * C_eq;
+  
+  const w1 = Math.sqrt((-B_eq - Math.sqrt(delta)) / (2 * A_eq));
+  const f0_dyn = Math.round((w1 / (2 * Math.PI)) * 10) / 10;
+  
+  const w_ref = Math.sqrt(k1 / m1);
+  const f_ref_dyn = Math.round((w_ref / (2 * Math.PI)) * 10) / 10;
+
+  let freqs = [4, 5, 6.3, 8, 10, 12.5, 16, 20, 25, 31.5, 40, 50, 63, 80, 100, 125, 160, 200, 250];
+  if (!freqs.includes(f0_dyn)) freqs.push(f0_dyn);
+  if (!freqs.includes(f_ref_dyn)) freqs.push(f_ref_dyn);
+  
+  const f_pass_rounded = Math.round(f_passage * 10) / 10;
+  const f_rugo_rounded = Math.round(f_rugosite * 10) / 10;
+  
+  if (!freqs.includes(f_pass_rounded) && f_pass_rounded >= 4 && f_pass_rounded <= 250) freqs.push(f_pass_rounded);
+  if (!freqs.includes(f_rugo_rounded) && f_rugo_rounded >= 4 && f_rugo_rounded <= 250) freqs.push(f_rugo_rounded);
+  
+  freqs.sort((a, b) => a - b);
+
+  const cAdd = (a, b) => [a[0]+b[0], a[1]+b[1]];
+  const cSub = (a, b) => [a[0]-b[0], a[1]-b[1]];
+  const cMul = (a, b) => [a[0]*b[0] - a[1]*b[1], a[0]*b[1] + a[1]*b[0]];
+  const cDiv = (n, d) => {
+    const den = d[0]*d[0] + d[1]*d[1];
+    return [(n[0]*d[0] + n[1]*d[1])/den, (n[1]*d[0] - n[0]*d[1])/den];
+  };
+  const cAbs = (a) => Math.sqrt(a[0]*a[0] + a[1]*a[1]);
+
+  const data = freqs.map(f => {
+    const w = 2 * Math.PI * f;
+    const k1c = [k1, w * c1];
+    const k2c = [k2, w * c2];
+    const m1c = [-m1 * w * w, 0];
+    const m2c = [-m2 * w * w, 0];
+
+    const term1 = cAdd(m1c, k1c);
+    const term2 = cAdd(m2c, cAdd(k1c, k2c));
+    const det = cSub(cMul(term1, term2), cMul(k1c, k1c));
+    const tf_sys_c = cDiv(cMul(k2c, k1c), det);
+    const tf_sys_mag = cAbs(tf_sys_c);
+    const Tsys = 20 * Math.log10(tf_sys_mag);
+
+    const term_ref = cAdd(m1c, k1c);
+    const tf_ref_c = cDiv(k1c, term_ref);
+    const tf_ref_mag = cAbs(tf_ref_c);
+    const Tref = 20 * Math.log10(tf_ref_mag);
+
+    const IL = Tref - Tsys;
+    return { f, Tsys: round2(Tsys), Tref: round2(Tref), IL: round2(IL) };
+  });
+
+  return { 
+    data, f0_dyn, f_ref_dyn, f_passage: f_pass_rounded, f_rugosite: f_rugo_rounded, v_ms,
+    details: { m1, m2, m_rail, m2_beton, m2_top, k1, k2, c1, c2, A_eq, B_eq, C_eq, delta } 
+  };
+}
+
+function round2(x) { return Math.round(x * 100) / 100; }
+
+// ─────────────────────────────────────────────────────────────────
+// PRÉRÉGLAGES
+// ─────────────────────────────────────────────────────────────────
+const CALIBRATION = {
+  vitesse: 30, lambda_rugo: 50,
+  M_ns: 360, A_rail: 6950, rho_rail: 7.85e-6, m_traverse: 0, a_RS: 650,
+  k_pad: 225, zeta_pad: 0.20, 
+  h_dalle: 500, b_dalle: 750, rho_beton: 2.5e-6, h_top: 200, rho_top: 1.7e-6,
+  C_MSS: 0.0467, zeta_MSS: 0.20, 
+};
+
+const PRESETS = {
+  'Note de Calcul (Metro 30 km/h)': CALIBRATION,
+  'Intercity rapide (120 km/h)': { ...CALIBRATION, vitesse: 120 },
+  'Défaut de rugosité court (λ=30mm)': { ...CALIBRATION, lambda_rugo: 30 },
+  'Voie sur blochets (ex: 120 kg)': { ...CALIBRATION, m_traverse: 120 },
+};
+
+// ─────────────────────────────────────────────────────────────────
+// COMPOSANTS UI
+// ─────────────────────────────────────────────────────────────────
+function Slider({ label, unit, value, min, max, step, onChange, formatValue, color = "#ea580c" }) {
+  const displayVal = formatValue ? formatValue(value) : value;
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
+        <span style={{ fontWeight: 600, color: '#334155' }}>{label}</span>
+        <span style={{ fontWeight: 700, color: color }}>{displayVal} <span style={{ color: '#94a3b8', fontWeight: 500 }}>{unit}</span></span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        style={{
+          width: '100%', height: 4, borderRadius: 2, appearance: 'none',
+          background: `linear-gradient(to right, ${color} 0%, ${color} ${((value - min) / (max - min)) * 100}%, #e2e8f0 ${((value - min) / (max - min)) * 100}%, #e2e8f0 100%)`
+        }}
+      />
+    </div>
+  );
+}
+
+function Stat({ label, value, unit, highlightColor }) {
+  return (
+    <div className="card" style={{ flex: 1, padding: '12px', textAlign: 'center', borderTop: highlightColor ? `3px solid ${highlightColor}` : '1px solid #e1e4e8' }}>
+      <div style={{ fontSize: 9.5, textTransform: 'uppercase', color: '#64748b', letterSpacing: 0.5, fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 800, color: highlightColor || '#0f172a', marginTop: 6 }}>
+        {value} <span style={{ fontSize: 11, fontWeight: 600, color: '#94a3b8' }}>{unit}</span>
+      </div>
+    </div>
+  );
+}
+
+function FormattedText({ text }) {
+  const formatMarkdown = (md) => {
+    return md
+      .replace(/### (.*?)\n/g, '<h3>$1</h3>')
+      .replace(/## (.*?)\n/g, '<h2>$1</h2>')
+      .replace(/# (.*?)\n/g, '<h1>$1</h1>')
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.*?)\*/g, '<em>$1</em>')
+      .replace(/\n\n/g, '<br/><br/>')
+      .replace(/\n/g, '<br/>')
+      .replace(/- (.*?)<br\/>/g, '<li>$1</li>')
+      .replace(/<li>(.*?)<\/li>/g, '<ul>$&</ul>')
+      .replace(/<\/ul><ul>/g, ''); 
+  };
+  return <div className="md-content" dangerouslySetInnerHTML={{ __html: formatMarkdown(text) }} />;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// APP PRINCIPALE
+// ─────────────────────────────────────────────────────────────────
+function App() {
+  const [params, setParams] = useState(CALIBRATION);
+  const [presetName, setPresetName] = useState('Note de Calcul (Metro 30 km/h)');
+  const [activeTab, setActiveTab] = useState('graphs');
+  
+  // NOUVEAU : Gestion de la clé API
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
+  useEffect(() => { localStorage.setItem('gemini_api_key', apiKey); }, [apiKey]);
+
+  // États de l'Assistant de Conception (Sidebar)
+  const [designPrompt, setDesignPrompt] = useState("");
+  const [isDesigning, setIsDesigning] = useState(false);
+  const [designExplanation, setDesignExplanation] = useState("");
+
+  // États du Tab Rapport & IA
+  const [isAiLoading, setIsAiLoading] = useState(false);
+  const [aiMainContent, setAiMainContent] = useState("");
+  const [chatInput, setChatInput] = useState("");
+  const [audioUrl, setAudioUrl] = useState(null);
+  const aiContentRef = useRef(null);
+
+  const update = (key) => (val) => {
+    setParams(prev => ({ ...prev, [key]: val }));
+    setPresetName('Personnalisé');
+    setDesignExplanation("");
+  };
+  
+  const applyPreset = (name) => {
+    setPresetName(name); setParams(PRESETS[name]); setDesignExplanation("");
+  };
+
+  const result = useMemo(() => computeCurves(params), [params]);
+  const { data, f0_dyn, f_ref_dyn, f_passage, f_rugosite, details } = result;
+
+  const ilAt63 = (data.find(d => d.f === 63) || {}).IL ?? 0;
+  const peakSysData = data.find(d => d.f === f0_dyn);
+
+  const getSimContext = () => `
+    [DONNÉES DU MODÈLE ACTUEL]
+    - Vitesse : ${params.vitesse} km/h
+    - Masse totale (M1) : ${details.m1.toFixed(0)} kg
+    - Masse Dalle (M2) : ${details.m2.toFixed(0)} kg
+    - Raideur semelle : ${params.k_pad} kN/mm
+    - Module élastomère MSS : ${params.C_MSS} N/mm³
+    - Fréquence propre VDF (f0) : ${f0_dyn} Hz
+    - Fréquence passage traverses : ${f_passage} Hz
+    - Fréquence usure (rugo) : ${f_rugosite} Hz
+    - Atténuation IL à 63 Hz : ${ilAt63.toFixed(1)} dB
+    - Amplification (T_sys) à f0 : ${peakSysData?.Tsys.toFixed(1)} dB
+  `;
+
+  const handleDesign = async () => {
+    if (!designPrompt) return;
+    setIsDesigning(true);
+    setDesignExplanation("");
+    
+    const schema = {
+      type: "OBJECT",
+      properties: {
+        vitesse: { type: "NUMBER", description: "Vitesse km/h (10-320)" },
+        M_ns: { type: "NUMBER", description: "Masse non suspendue roue kg (0-1000)" },
+        A_rail: { type: "NUMBER", description: "Section rail mm2 (5000-9000)" },
+        m_traverse: { type: "NUMBER", description: "Masse traverse kg (0-400)" },
+        a_RS: { type: "NUMBER", description: "Entraxe fixations mm (500-1000)" },
+        h_dalle: { type: "NUMBER", description: "Hauteur dalle béton mm (300-800)" },
+        h_top: { type: "NUMBER", description: "Hauteur couche sup mm (0-400)" },
+        k_pad: { type: "NUMBER", description: "Raideur semelle kN/mm (50-500)" },
+        zeta_pad: { type: "NUMBER", description: "Amortissement semelle (0.05-0.4)" },
+        C_MSS: { type: "NUMBER", description: "Module MSS N/mm3 (0.005-0.1)" },
+        zeta_MSS: { type: "NUMBER", description: "Amortissement MSS (0.02-0.4)" },
+        lambda_rugo: { type: "NUMBER", description: "Rugosité rail mm (20-150)" },
+        explication: { type: "STRING", description: "Courte justification technique de l'ingénieur." }
+      },
+      required: ["vitesse", "M_ns", "A_rail", "m_traverse", "a_RS", "h_dalle", "h_top", "k_pad", "zeta_pad", "C_MSS", "zeta_MSS", "lambda_rugo", "explication"]
+    };
+
+    const sysInst = "Tu es un ingénieur acousticien. Configure les paramètres physiques d'une VDF selon le prompt du client. Renvoie un JSON.";
+    const response = await callGeminiAPI(apiKey, designPrompt, sysInst, schema);
+    
+    if (response) {
+      const { explication, ...newParams } = response;
+      setParams(prev => ({ ...prev, ...newParams }));
+      setPresetName('Généré par IA ✨');
+      setDesignExplanation(explication);
+    } else {
+      setDesignExplanation("Erreur lors de la génération. Veuillez réessayer.");
+    }
+    setIsDesigning(false);
+  };
+
+  const executeAiAction = async (prompt, systemInstruction) => {
+    setIsAiLoading(true);
+    setActiveTab('ai');
+    setAiMainContent("");
+    setAudioUrl(null);
+    
+    const fullPrompt = `${getSimContext()}\n\n${prompt}`;
+    const response = await callGeminiAPI(apiKey, fullPrompt, systemInstruction);
+    
+    setAiMainContent(response);
+    setIsAiLoading(false);
+    
+    setTimeout(() => {
+      aiContentRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 100);
+  };
+
+  const handleGenerateReport = () => {
+    const sysInst = "Tu es un ingénieur acousticien sénior. Tu rédiges avec rigueur, expertise et clarté.";
+    const prompt = `Rédige un rapport technique complet en Markdown structuré en : Intro, Analyse des Paramètres, Risques Cinématiques, Performances (IL), Recommandations.`;
+    executeAiAction(prompt, sysInst);
+  };
+
+  const handleGenerateLayman = () => {
+    const sysInst = "Tu es un communicant technique brillant.";
+    const prompt = `Traduis ces résultats en un "Pitch Décideur" pour un maire ou investisseur. Utilise des métaphores simples, pas de jargon mathématique.`;
+    executeAiAction(prompt, sysInst);
+  };
+
+  const handleGenerateSourcing = () => {
+    const sysInst = "Tu es un ingénieur expert en achat technique et matériaux antivibratoires ferroviaires.";
+    const prompt = `À partir de ce modèle (module MSS de ${params.C_MSS} N/mm³), recommande 3 marques ou gammes commerciales réelles (ex: Sylomer, Sylodyn, CDM, ressorts acier) adaptées. Décris les avantages de chaque matériau.`;
+    executeAiAction(prompt, sysInst);
+  };
+
+  const handleGenerateAudio = async () => {
+    setIsAiLoading(true);
+    setAudioUrl(null);
+    setActiveTab('ai');
+    setAiMainContent("Rédaction du script en cours...");
+    
+    const sysInst = "Tu es un podcaster technique enthousiaste. Rédige un script oral fluide et très court (3 phrases) pour un ingénieur. N'utilise aucun formatage Markdown ni astérisques. Que du texte brut directement prononçable.";
+    const prompt = `Résume cette configuration à l'oral. Indique la fréquence propre et l'atténuation :\n${getSimContext()}`;
+    
+    const script = await callGeminiAPI(apiKey, prompt, sysInst);
+    setAiMainContent(`🎧 Script généré :\n\n"${script}"\n\nSynthèse vocale en cours...`);
+    
+    if (!apiKey) {
+      setIsAiLoading(false);
+      return;
+    }
+
+    const inlineData = await callGeminiTTS(apiKey, script, "Aoede"); // Voix douce adaptée
+    
+    if (inlineData) {
+      const mimeType = inlineData.mimeType || 'audio/pcm;rate=24000';
+      const rateMatch = mimeType.match(/rate=(\d+)/);
+      const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+      
+      const binaryString = atob(inlineData.data);
+      const pcmBytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+          pcmBytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      const wavBytes = pcmToWav(pcmBytes, sampleRate);
+      const blob = new Blob([wavBytes], { type: 'audio/wav' });
+      setAudioUrl(URL.createObjectURL(blob));
+      setAiMainContent(`🎧 Script vocal :\n\n"${script}"`);
+    } else {
+      setAiMainContent(`🎧 Script vocal :\n\n"${script}"\n\n(Erreur lors de la génération audio)`);
+    }
+    
+    setIsAiLoading(false);
+  };
+
+  const handleChat = () => {
+    if(!chatInput) return;
+    const sysInst = "Tu es un ingénieur ferroviaire répondant de façon technique, claire et précise.";
+    const prompt = `L'utilisateur pose une question sur ce modèle. Réponds directement.\nQuestion : ${chatInput}`;
+    executeAiAction(prompt, sysInst);
+  };
+
+  return (
+    <div className="layout-container" style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+      
+      <div className="layout-header">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, letterSpacing: -0.5 }}>Simulateur Acoustique VDF 4.0</h1>
+            <p style={{ margin: '4px 0 0', fontSize: 12, color: '#cbd5e1' }}>Intelligence Artificielle & Synthèse Vocale Intégrées</p>
+          </div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button className={`tab-btn ${activeTab === 'graphs' ? 'active' : ''}`} onClick={() => setActiveTab('graphs')}>Graphiques</button>
+            <button className={`tab-btn ${activeTab === 'details' ? 'active' : ''}`} onClick={() => setActiveTab('details')}>Détails & Matrices</button>
+            <button className={`tab-btn ai-tab ${activeTab === 'ai' ? 'active' : ''}`} onClick={() => setActiveTab('ai')}>✨ Rapport & IA</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="layout-main">
+        
+        <div className="layout-sidebar">
+          {/* CONFIGURATION API KEY */}
+          <div style={{ marginBottom: 24, padding: 12, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8 }}>
+            <label style={{ fontSize: 11, fontWeight: 700, color: '#334155', textTransform: 'uppercase', display: 'block', marginBottom: 8 }}>
+              ⚙️ Clé API Gemini
+            </label>
+            <input 
+              type="password" 
+              placeholder="Collez votre clé API ici..."
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #cbd5e1', fontSize: '12px', fontFamily: 'monospace' }}
+            />
+            <p style={{ fontSize: 10, color: '#94a3b8', margin: '6px 0 0 0', lineHeight: 1.3 }}>
+              Clé stockée localement dans votre navigateur. Obtenez une clé gratuite sur <a href="https://aistudio.google.com/app/apikey" target="_blank" style={{color: '#ff8c00'}}>Google AI Studio</a>.
+            </p>
+          </div>
+
+          <div style={{ marginBottom: 24 }}>
+            <label style={{ fontSize: 11, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase' }}>Configurations Préétablies</label>
+            <select value={presetName} onChange={(e) => applyPreset(e.target.value)} style={{ width: '100%', marginTop: 8, padding: '10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13, background: '#f8fafc', cursor: 'pointer', fontWeight: 500 }}>
+              {Object.keys(PRESETS).map(name => <option key={name} value={name}>{name}</option>)}
+              {presetName === 'Personnalisé' && <option value="Personnalisé">Personnalisé</option>}
+              {presetName === 'Généré par IA ✨' && <option value="Généré par IA ✨">Généré par IA ✨</option>}
+            </select>
+          </div>
+
+          <div style={{ marginBottom: 24, padding: 12, background: 'linear-gradient(to bottom right, #fdf4ff, #faf5ff)', border: '1px solid #e9d5ff', borderRadius: 8 }}>
+            <label style={{ fontSize: 11, fontWeight: 700, color: '#9333ea', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: 4 }}>
+              ✨ Assistant de Conception IA
+            </label>
+            <textarea 
+              className="ai-textarea"
+              placeholder="Ex: Tramway en centre-ville (40 km/h) passant près d'un hôpital. Besoin d'une très forte atténuation..."
+              value={designPrompt}
+              onChange={(e) => setDesignPrompt(e.target.value)}
+            />
+            <button className="gemini-btn" style={{ marginTop: 8, padding: '8px', fontSize: 12 }} onClick={handleDesign} disabled={isDesigning || !designPrompt}>
+              {isDesigning ? "Génération en cours..." : "Générer la conception VDF"}
+            </button>
+            {designExplanation && (
+              <div style={{ marginTop: 12, fontSize: 12, color: '#4c1d95', lineHeight: 1.4, padding: 10, background: '#fff', borderRadius: 4, border: '1px solid #ddd6fe' }}>
+                <strong>Expertise :</strong> {designExplanation}
+              </div>
+            )}
+          </div>
+
+          <h3 style={{ marginTop: 0, fontSize: 13, borderBottom: '1px solid #e2e8f0', paddingBottom: 8, color: '#334155' }}>Cinématique & Excitation</h3>
+          <Slider label="Vitesse du train (v)" unit="km/h" value={params.vitesse} min={10} max={320} step={5} onChange={update('vitesse')} color="#dc2626" />
+          <Slider label="Rugosité du rail (λ)" unit="mm" value={params.lambda_rugo} min={20} max={150} step={5} onChange={update('lambda_rugo')} color="#7c3aed" />
+
+          <h3 style={{ marginTop: 24, fontSize: 13, borderBottom: '1px solid #e2e8f0', paddingBottom: 8, color: '#334155' }}>Superstructure (Rail, Traverses)</h3>
+          <Slider label="Masse non suspendue (Roue)" unit="kg" value={params.M_ns} min={0} max={1000} step={10} onChange={update('M_ns')} />
+          <Slider label="Section du rail (A)" unit="mm²" value={params.A_rail} min={5000} max={9000} step={10} onChange={update('A_rail')} />
+          <Slider label="Masse traverse/blochet" unit="kg" value={params.m_traverse} min={0} max={400} step={10} onChange={update('m_traverse')} />
+          <Slider label="Entraxe fixations (a_RS)" unit="mm" value={params.a_RS} min={500} max={1000} step={10} onChange={update('a_RS')} />
+
+          <h3 style={{ marginTop: 24, fontSize: 13, borderBottom: '1px solid #e2e8f0', paddingBottom: 8, color: '#334155' }}>Infrastructure (Dalle & MSS)</h3>
+          <Slider label="Hauteur dalle béton" unit="mm" value={params.h_dalle} min={300} max={800} step={10} onChange={update('h_dalle')} />
+          <Slider label="Hauteur couche sup." unit="mm" value={params.h_top} min={0} max={400} step={10} onChange={update('h_top')} />
+          <Slider label="Raideur semelle (k_pad)" unit="kN/mm" value={params.k_pad} min={50} max={500} step={5} onChange={update('k_pad')} />
+          <Slider label="Amort. semelle (ζ)" unit="—" value={params.zeta_pad} min={0.05} max={0.4} step={0.01} onChange={update('zeta_pad')} />
+          <Slider label="Module MSS effectif" unit="N/mm³" value={params.C_MSS} min={0.005} max={0.1} step={0.001} onChange={update('C_MSS')} formatValue={v => v.toFixed(4)} />
+          <Slider label="Amort. MSS (ζ)" unit="—" value={params.zeta_MSS} min={0.02} max={0.4} step={0.01} onChange={update('zeta_MSS')} />
+
+        </div>
+
+        <div className="layout-content">
+          
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 10, marginBottom: 24 }}>
+            <Stat label="M1 (Voie)" value={details.m1.toFixed(0)} unit="kg" />
+            <Stat label="M2 (Dalle)" value={details.m2.toFixed(0)} unit="kg" />
+            <Stat label="Résonance f0" value={f0_dyn} unit="Hz" />
+            <Stat label="IL 63Hz" value={ilAt63.toFixed(1)} unit="dB" />
+            <Stat label="Exc. Traverses" value={f_passage} unit="Hz" highlightColor="#dc2626" />
+            <Stat label="Exc. Rugosité" value={f_rugosite > 999 ? ">1k" : f_rugosite} unit="Hz" highlightColor="#7c3aed" />
+          </div>
+
+          {activeTab === 'graphs' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+              <div className="card">
+                <h3 style={{ marginTop: 0, fontSize: 15, color: '#0f172a' }}>Fonction de transfert [dB]</h3>
+                <ResponsiveContainer width="100%" height={320}>
+                  <LineChart data={data} margin={{ top: 20, right: 30, bottom: 30, left: 10 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                    <XAxis dataKey="f" scale="log" domain={[4, 250]} type="number" ticks={[4,8,16,31.5,63,125,250]} tick={{fontSize: 12, fill: '#64748b'}} label={{ value: 'Fréquence [Hz]', position: 'insideBottom', offset: -20, fontSize: 13, fill: '#475569', fontWeight: 500 }} />
+                    <YAxis domain={[-50, 20]} ticks={[-50,-40,-30,-20,-10,0,10,20]} tick={{fontSize: 12, fill: '#64748b'}} label={{ value: 'Gain [dB]', angle: -90, position: 'insideLeft', offset: -5, fontSize: 13, fill: '#475569', fontWeight: 500 }} />
+                    <Tooltip contentStyle={{fontSize: 13, borderRadius: 8, border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)'}} formatter={(val) => val.toFixed(1) + ' dB'} labelFormatter={(val) => val + ' Hz'}/>
+                    <Legend verticalAlign="top" height={36} iconType="plainline" />
+                    <ReferenceLine y={0} stroke="#0f172a" strokeWidth={1} opacity={0.2} />
+                    
+                    {f_passage >= 4 && f_passage <= 250 && (
+                       <ReferenceLine x={f_passage} stroke="#dc2626" strokeDasharray="4 4" label={{ value: 'Traverses', position: 'insideTopLeft', fill: '#dc2626', fontSize: 11, fontWeight: 700 }} />
+                    )}
+                    {f_rugosite >= 4 && f_rugosite <= 250 && (
+                       <ReferenceLine x={f_rugosite} stroke="#7c3aed" strokeDasharray="4 4" label={{ value: 'Rugosité', position: 'insideBottomRight', fill: '#7c3aed', fontSize: 11, fontWeight: 700 }} />
+                    )}
+                    
+                    <Line type="monotone" dataKey="Tsys" name="SMR + semelle (Radier rigide)" stroke="#ea580c" strokeWidth={3} dot={false} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="Tref" name="Semelle sous rail (Radier rigide)" stroke="#94a3b8" strokeWidth={3} dot={false} isAnimationActive={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              <div className="card">
+                <h3 style={{ marginTop: 0, fontSize: 15, color: '#0f172a' }}>Perte par insertion (Insertion Loss) [dB]</h3>
+                <ResponsiveContainer width="100%" height={280}>
+                  <LineChart data={data} margin={{ top: 20, right: 30, bottom: 30, left: 10 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                    <XAxis dataKey="f" scale="log" domain={[4, 250]} type="number" ticks={[4,8,16,31.5,63,125,250]} tick={{fontSize: 12, fill: '#64748b'}} label={{ value: 'Fréquence [Hz]', position: 'insideBottom', offset: -20, fontSize: 13, fill: '#475569', fontWeight: 500 }} />
+                    <YAxis domain={[-20, 40]} ticks={[-20,-10,0,10,20,30,40]} tick={{fontSize: 12, fill: '#64748b'}} label={{ value: 'Atténuation [dB]', angle: -90, position: 'insideLeft', offset: -5, fontSize: 13, fill: '#475569', fontWeight: 500 }} />
+                    <Tooltip contentStyle={{fontSize: 13, borderRadius: 8, border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)'}} formatter={(val) => val.toFixed(1) + ' dB'} labelFormatter={(val) => val + ' Hz'}/>
+                    <ReferenceLine y={0} stroke="#0f172a" strokeWidth={1} opacity={0.2} />
+
+                    {f_passage >= 4 && f_passage <= 250 && (
+                       <ReferenceLine x={f_passage} stroke="#dc2626" strokeDasharray="4 4" label={{ value: 'Traverses', position: 'insideTopLeft', fill: '#dc2626', fontSize: 11, fontWeight: 700 }} />
+                    )}
+                    {f_rugosite >= 4 && f_rugosite <= 250 && (
+                       <ReferenceLine x={f_rugosite} stroke="#7c3aed" strokeDasharray="4 4" label={{ value: 'Rugosité', position: 'insideBottomRight', fill: '#7c3aed', fontSize: 11, fontWeight: 700 }} />
+                    )}
+                    
+                    <Line type="monotone" dataKey="IL" name="Perte par insertion" stroke="#2563eb" strokeWidth={3} dot={false} isAnimationActive={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'details' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+              
+              <div className="card">
+                <h3 style={{ marginTop: 0, fontSize: 15, borderBottom: '1px solid #e2e8f0', paddingBottom: 8 }}>Cinématique et Défauts de Surface</h3>
+                
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 12 }}>
+                  <div style={{ padding: 12, background: '#fef2f2', borderRadius: 6, border: '1px solid #fecaca' }}>
+                    <strong style={{ color: '#0f172a', fontSize: 14 }}>Excitation paramétrique (Traverses)</strong>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginTop: 10 }}>
+                      <div style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", background: '#fff', padding: '6px 12px', border: '1px solid #fecaca', borderRadius: 4 }}>
+                        f_passage = v / a_RS
+                      </div>
+                      <div className="math-val" style={{ color: '#dc2626', fontSize: 16, fontWeight: 700 }}>{f_passage} Hz</div>
+                    </div>
+                  </div>
+
+                  <div style={{ padding: 12, background: '#f5f3ff', borderRadius: 6, border: '1px solid #e9d5ff' }}>
+                    <strong style={{ color: '#0f172a', fontSize: 14 }}>Excitation surfacique (Rugosité)</strong>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginTop: 10 }}>
+                      <div style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", background: '#fff', padding: '6px 12px', border: '1px solid #e9d5ff', borderRadius: 4 }}>
+                        f_rugo = v / λ
+                      </div>
+                      <div className="math-val" style={{ color: '#7c3aed', fontSize: 16, fontWeight: 700 }}>{f_rugosite} Hz</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
+                <div className="card">
+                  <h3 style={{ marginTop: 0, fontSize: 14, borderBottom: '1px solid #e2e8f0', paddingBottom: 8 }}>Vecteur Masse [M]</h3>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <div><div className="math-lbl">m1_rail</div><div className="math-val">{details.m_rail.toFixed(2)} kg</div></div>
+                    <div><div className="math-lbl">m1_traverse</div><div className="math-val">{params.m_traverse.toFixed(2)} kg</div></div>
+                    <div><div className="math-lbl">m1_non_susp</div><div className="math-val">{params.M_ns.toFixed(2)} kg</div></div>
+                    <div><div className="math-lbl" style={{color:'#ea580c'}}>Total m1</div><div className="math-val" style={{fontWeight:700}}>{details.m1.toFixed(2)} kg</div></div>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12, paddingTop: 12, borderTop: '1px solid #f1f5f9' }}>
+                    <div><div className="math-lbl">m2_béton</div><div className="math-val">{details.m2_beton.toFixed(2)} kg</div></div>
+                    <div><div className="math-lbl">m2_top</div><div className="math-val">{details.m2_top.toFixed(2)} kg</div></div>
+                    <div></div>
+                    <div><div className="math-lbl" style={{color:'#ea580c'}}>Total m2</div><div className="math-val" style={{fontWeight:700}}>{details.m2.toFixed(2)} kg</div></div>
+                  </div>
+                </div>
+
+                <div className="card">
+                  <h3 style={{ marginTop: 0, fontSize: 14, borderBottom: '1px solid #e2e8f0', paddingBottom: 8 }}>Impédances [K] & [C]</h3>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span className="math-lbl">Raideur k1 (Semelle)</span><span className="math-val">{(details.k1).toExponential(3)} N/m</span></div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span className="math-lbl">Amort. c1</span><span className="math-val">{(details.c1).toExponential(3)} N.s/m</span></div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 12 }}><span className="math-lbl">Raideur k2 (MSS)</span><span className="math-val">{(details.k2).toExponential(3)} N/m</span></div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span className="math-lbl">Amort. c2</span><span className="math-val">{(details.c2).toExponential(3)} N.s/m</span></div>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          )}
+
+          {activeTab === 'ai' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+              
+              <div className="card" style={{ background: 'linear-gradient(135deg, #f3e8ff 0%, #e0e7ff 100%)', border: '1px solid #c7d2fe' }}>
+                <h3 style={{ marginTop: 0, fontSize: 18, color: '#312e81', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  ✨ Centre de Commandes IA
+                </h3>
+                <p style={{ fontSize: 13, color: '#4338ca', marginBottom: 20 }}>
+                  Générez des rapports, explorez des recommandations commerciales, ou écoutez un résumé vocal synthétisé de votre VDF actuelle.
+                </p>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                  <button className="gemini-btn" onClick={handleGenerateReport} disabled={isAiLoading}>
+                    📝 Rapport Technique (Markdown)
+                  </button>
+                  <button className="gemini-btn secondary" onClick={handleGenerateLayman} disabled={isAiLoading}>
+                    🗣️ Vulgarisation Décideurs
+                  </button>
+                  <button className="gemini-btn secondary" onClick={handleGenerateSourcing} disabled={isAiLoading}>
+                    🏭 Recommandation Fournisseurs
+                  </button>
+                  <button className="gemini-btn success" onClick={handleGenerateAudio} disabled={isAiLoading}>
+                    🎧 Générer Briefing Audio (TTS)
+                  </button>
+                </div>
+
+                <div style={{ marginTop: 24, paddingTop: 20, borderTop: '1px solid #c7d2fe' }}>
+                  <label style={{ fontSize: 13, fontWeight: 600, color: '#312e81', display: 'block', marginBottom: 8 }}>
+                    💬 Poser une question spécifique à l'Ingénieur IA :
+                  </label>
+                  <div style={{ display: 'flex', gap: 12 }}>
+                    <input 
+                      type="text" 
+                      className="ai-textarea" 
+                      style={{ margin: 0, minHeight: 'auto', flex: 1, fontSize: 14, padding: 12 }}
+                      placeholder="Que se passe-t-il si la rigidité du tapis vieillit (+20%) ?"
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      onKeyPress={(e) => e.key === 'Enter' && handleChat()}
+                    />
+                    <button className="gemini-btn" style={{ width: 'auto', padding: '0 24px' }} onClick={handleChat} disabled={isAiLoading || !chatInput}>
+                      Demander
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Affichage des résultats / Lecteur Audio */}
+              {(isAiLoading || aiMainContent || audioUrl) && (
+                <div className="card" ref={aiContentRef} style={{ minHeight: 200, padding: 30 }}>
+                  {isAiLoading ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#6366f1' }}>
+                      <div style={{ fontSize: 24, marginBottom: 16 }}>✨</div>
+                      <div style={{ fontSize: 14, fontWeight: 600 }}>L'IA interagit avec le modèle...</div>
+                    </div>
+                  ) : (
+                    <>
+                      {audioUrl && (
+                        <div style={{ marginBottom: 24, padding: 20, background: '#f0fdf4', borderRadius: 8, border: '1px solid #bbf7d0' }}>
+                          <h4 style={{ margin: '0 0 12px 0', color: '#166534', fontSize: 14 }}>▶️ Lecteur Audio (Voix de Synthèse)</h4>
+                          <audio src={audioUrl} controls autoPlay style={{ width: '100%' }} />
+                        </div>
+                      )}
+                      <FormattedText text={aiMainContent} />
+                    </>
+                  )}
+                </div>
+              )}
+
+            </div>
+          )}
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
