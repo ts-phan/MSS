@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Calibrage VDF — Système Masse-Ressort</title>
+<title>Simulateur Système Masse-Ressort</title>
 
 <!-- React + ReactDOM (production) -->
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -133,42 +133,76 @@ const {
 // ─────────────────────────────────────────────────────────────────
 // API GEMINI (Texte et Audio)
 // ─────────────────────────────────────────────────────────────────
-const GEMINI_MODEL = "gemini-2.5-flash-preview-09-2025";
+const GEMINI_MODEL = "gemini-1.5-flash";
 const GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts";
 
+let cachedModel = null;
+
+async function getBestModel(apiKey) {
+  if (cachedModel) return cachedModel;
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1/models?key=${apiKey}`);
+    if (!res.ok) {
+       console.error("Erreur ListModels, utilisation du fallback.");
+       return "gemini-1.5-flash"; 
+    }
+    const data = await res.json();
+    const valid = (data.models || []).filter(m => m.supportedGenerationMethods?.includes("generateContent"));
+    
+    // Découverte du meilleur modèle autorisé pour votre clé spécifique
+    const flash15 = valid.find(m => m.name.includes("gemini-1.5-flash"));
+    const flash8b = valid.find(m => m.name.includes("gemini-1.5-flash-8b"));
+    const pro15 = valid.find(m => m.name.includes("gemini-1.5-pro"));
+    const geminiPro = valid.find(m => m.name.includes("gemini-pro"));
+    
+    // On sélectionne le premier valide trouvé, ou le tout premier de la liste
+    const chosen = flash15 || flash8b || pro15 || geminiPro || valid[0];
+    
+    if (chosen) {
+      cachedModel = chosen.name.replace('models/', '');
+      console.log("✅ Modèle IA auto-détecté par le système :", cachedModel);
+      return cachedModel;
+    }
+  } catch(e) {
+    console.error("Erreur réseau lors de la découverte des modèles:", e);
+  }
+  return "gemini-1.5-flash"; 
+}
+
 async function callGeminiAPI(apiKey, prompt, systemInstructionText, jsonSchema = null) {
-  if (!apiKey) return jsonSchema ? null : "⚠️ Erreur: Clé API manquante. Veuillez saisir votre clé Gemini dans le panneau latéral de gauche.";
+  if (!apiKey) return { error: "Clé API manquante." };
   
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  const targetModel = await getBestModel(apiKey);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${apiKey}`;
+  
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
     systemInstruction: { parts: [{ text: systemInstructionText }] }
   };
 
   if (jsonSchema) {
-    payload.generationConfig = {
-      responseMimeType: "application/json",
-      responseSchema: jsonSchema
-    };
+    payload.generationConfig = { responseMimeType: "application/json", responseSchema: jsonSchema };
   }
 
-  const delays = [1000, 2000, 4000, 8000, 16000];
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      const result = await response.json();
-      const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
-      
-      if (jsonSchema && text) {
-        const cleanText = text.replace(/```json/gi, '').replace(/```/g, '').trim();
-        return JSON.parse(cleanText);
-      }
-      return text || "Pas de réponse générée.";
-    } catch (error) {
-      if (attempt === 4) return jsonSchema ? null : "Erreur: Impossible de joindre l'expert IA pour le moment. Veuillez réessayer.";
-      await new Promise(res => setTimeout(res, delays[attempt]));
+  try {
+    const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    
+    if (!response.ok) {
+       const errData = await response.json();
+       return { error: `Erreur API Google (${targetModel}) : ${errData.error?.message || response.statusText}` };
     }
+    
+    const result = await response.json();
+    const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+    
+    if (jsonSchema && text) {
+      try {
+        return JSON.parse(text.replace(/```json/gi, '').replace(/```/g, '').trim());
+      } catch(e) { return { error: "Format JSON renvoyé invalide." }; }
+    }
+    return text || { error: "L'IA n'a retourné aucun texte." };
+  } catch (error) {
+     return { error: `Erreur de connexion : ${error.message}` };
   }
 }
 
@@ -239,8 +273,10 @@ function pcmToWav(pcmData, sampleRate) {
 function computeCurves(p) {
   const {
     vitesse, lambda_rugo,
-    M_ns, A_rail, rho_rail, m_traverse, a_RS,
+    M_ns, A_rail, rho_rail, a_RS,
     k_pad, zeta_pad,
+    m_traverse,
+    k_semelle_traverse, zeta_semelle_traverse,
     h_dalle, b_dalle, rho_beton, h_top, rho_top,
     C_MSS, zeta_MSS
   } = p;
@@ -252,31 +288,60 @@ function computeCurves(p) {
   const f_passage = v_ms / a_RS_m;     
   const f_rugosite = v_ms / lambda_m;  
 
+  // ── Masses des 3 étages (tributaires, sur l'entraxe a_RS) ──
   const m_rail = rho_rail * A_rail * a_RS;
-  const m1 = m_rail + m_traverse + M_ns; 
-  const m2_beton = rho_beton * h_dalle * b_dalle * a_RS;
-  const m2_top = rho_top * h_top * b_dalle * a_RS;
-  const m2 = m2_beton + m2_top;
+  const m1 = m_rail + M_ns;              // m1 = RAIL (+ masse non suspendue roue)
+  const m2 = m_traverse;                  // m2 = TRAVERSE / BLOCHET
+  const m3_beton = rho_beton * h_dalle * b_dalle * a_RS;
+  const m3_top = rho_top * h_top * b_dalle * a_RS;
+  const m3 = m3_beton + m3_top;           // m3 = DALLE (+ couche superieure)
 
-  const k1 = k_pad * 1000000;
-  const k2 = C_MSS * b_dalle * a_RS * 1000;
+  // ── Raideurs des 3 étages ──
+  const k1 = k_pad * 1000000;                                  // rail pad [N/m]
+  const k2 = k_semelle_traverse * 1000000;                     // semelle sous traverse [N/m]
+  const k3 = C_MSS * b_dalle * a_RS * 1000;                    // tapis/plot sous dalle (MSS) [N/m]
 
   const c1 = 2 * zeta_pad * Math.sqrt(k1 * m1);
-  const c2 = 2 * zeta_MSS * Math.sqrt(k2 * m2);
+  const c2 = 2 * zeta_semelle_traverse * Math.sqrt(k2 * m2);
+  const c3 = 2 * zeta_MSS * Math.sqrt(k3 * m3);
 
-  const A_eq = m1 * m2;
-  const B_eq = -(m1 * k1 + m1 * k2 + m2 * k1);
-  const C_eq = k1 * k2;
-  const delta = B_eq * B_eq - 4 * A_eq * C_eq;
-  
-  const w1 = Math.sqrt((-B_eq - Math.sqrt(delta)) / (2 * A_eq));
-  const f0_dyn = Math.round((w1 / (2 * Math.PI)) * 10) / 10;
-  
+  // ── Fréquences propres du système à 3 DDL (racines du polynôme caractéristique) ──
+  // det(-Mw² + K) = 0 en non-amorti, degré 3 en w² -> on résout numériquement
+  // par balayage + raffinement (plus robuste en JS qu'une formule de Cardan directe).
+  const charPoly = (w2) => {
+    const A11 = -m1*w2 + k1;
+    const A22 = -m2*w2 + k1 + k2;
+    const A33 = -m3*w2 + k2 + k3;
+    return A11*(A22*A33 - k2*k2) - k1*k1*A33;
+  };
+  // Balayage grossier en Hz puis raffinement par bissection sur les changements de signe
+  const roots = [];
+  const fMaxScan = 400, steps = 4000;
+  let prevF = 0.5, prevVal = charPoly((2*Math.PI*prevF)**2);
+  for (let i = 1; i <= steps; i++) {
+    const f = 0.5 + (fMaxScan - 0.5) * i / steps;
+    const val = charPoly((2*Math.PI*f)**2);
+    if (prevVal === 0 || (prevVal > 0) !== (val > 0)) {
+      // bissection
+      let lo = prevF, hi = f, vLo = prevVal;
+      for (let it = 0; it < 50; it++) {
+        const mid = (lo + hi) / 2;
+        const vMid = charPoly((2*Math.PI*mid)**2);
+        if ((vMid > 0) === (vLo > 0)) { lo = mid; vLo = vMid; } else { hi = mid; }
+      }
+      roots.push(Math.round((lo + hi) / 2 * 100) / 100);
+    }
+    prevF = f; prevVal = val;
+  }
+  const f0_modes = roots.slice(0, 3);          // les 3 fréquences propres (ordre croissant)
+  const f0_dyn = f0_modes[0] ?? 0;              // mode dominant (le plus bas, généralement le plus excité)
+
+  // ── Référence : rail seul (m1) sur radier rigide via le rail pad (k1) ──
   const w_ref = Math.sqrt(k1 / m1);
   const f_ref_dyn = Math.round((w_ref / (2 * Math.PI)) * 10) / 10;
 
   let freqs = [4, 5, 6.3, 8, 10, 12.5, 16, 20, 25, 31.5, 40, 50, 63, 80, 100, 125, 160, 200, 250];
-  if (!freqs.includes(f0_dyn)) freqs.push(f0_dyn);
+  f0_modes.forEach(fm => { if (!freqs.includes(fm) && fm >= 4 && fm <= 250) freqs.push(fm); });
   if (!freqs.includes(f_ref_dyn)) freqs.push(f_ref_dyn);
   
   const f_pass_rounded = Math.round(f_passage * 10) / 10;
@@ -296,53 +361,117 @@ function computeCurves(p) {
   };
   const cAbs = (a) => Math.sqrt(a[0]*a[0] + a[1]*a[1]);
 
-  const data = freqs.map(f => {
+  // ── T_sys : force transmise au radier / force appliquée sur le rail ──
+  //   Chaîne : F(t) → m1(rail) --K1-- m2(traverse) --K2-- m3(dalle) --K3-- Radier fixe
+  //   T_sys = K1.K2.K3 / det[A]      avec
+  //   det[A] = A11.(A22.A33 - K2²) - K1².A33
+  //   A11 = -m1w²+K1 ; A22 = -m2w²+K1+K2 ; A33 = -m3w²+K2+K3
+  const computeTsys = (f) => {
     const w = 2 * Math.PI * f;
     const k1c = [k1, w * c1];
     const k2c = [k2, w * c2];
+    const k3c = [k3, w * c3];
     const m1c = [-m1 * w * w, 0];
     const m2c = [-m2 * w * w, 0];
+    const m3c = [-m3 * w * w, 0];
 
-    const term1 = cAdd(m1c, k1c);
-    const term2 = cAdd(m2c, cAdd(k1c, k2c));
-    const det = cSub(cMul(term1, term2), cMul(k1c, k1c));
-    const tf_sys_c = cDiv(cMul(k2c, k1c), det);
-    const tf_sys_mag = cAbs(tf_sys_c);
-    const Tsys = 20 * Math.log10(tf_sys_mag);
+    const A11 = cAdd(m1c, k1c);                           // -m1w² + K1
+    const A22 = cAdd(m2c, cAdd(k1c, k2c));                // -m2w² + K1+K2
+    const A33 = cAdd(m3c, cAdd(k2c, k3c));                // -m3w² + K2+K3
 
-    const term_ref = cAdd(m1c, k1c);
-    const tf_ref_c = cDiv(k1c, term_ref);
-    const tf_ref_mag = cAbs(tf_ref_c);
-    const Tref = 20 * Math.log10(tf_ref_mag);
+    const inner = cSub(cMul(A22, A33), cMul(k2c, k2c));   // A22.A33 - K2²
+    const detSys = cSub(cMul(A11, inner), cMul(k1c, cMul(k1c, A33))); // A11.inner - K1².A33
+    const numSys = cMul(cMul(k1c, k2c), k3c);             // K1.K2.K3
+    const tfSys = cDiv(numSys, detSys);
 
-    const IL = Tref - Tsys;
-    return { f, Tsys: round2(Tsys), Tref: round2(Tref), IL: round2(IL) };
+    return { w, k1c, k2c, k3c, m1c, m2c, m3c, A11, A22, A33, inner, detSys, numSys, tfSys,
+             tfSysMag: cAbs(tfSys), tfSysDb: 20*Math.log10(cAbs(tfSys)) };
+  };
+
+  // ── T_ref : rail seul (m1) sur radier rigide via K1 (référence "semelle seule") ──
+  const computeTref = (f) => {
+    const w = 2 * Math.PI * f;
+    const k1c = [k1, w * c1];
+    const m1c = [-m1 * w * w, 0];
+    const termRef = cAdd(m1c, k1c);
+    const tfRef = cDiv(k1c, termRef);
+    return { w, k1c, m1c, termRef, tfRef, tfRefMag: cAbs(tfRef), tfRefDb: 20*Math.log10(cAbs(tfRef)) };
+  };
+
+  const data = freqs.map(f => {
+    const sys = computeTsys(f);
+    const ref = computeTref(f);
+    const IL = ref.tfRefDb - sys.tfSysDb;
+    return { f, Tsys: round2(sys.tfSysDb), Tref: round2(ref.tfRefDb), IL: round2(IL) };
   });
 
+  const detailAtF0 = computeTsys(f0_dyn);
+  const detailAtFref = computeTref(f_ref_dyn);
+  // Fusion pour compat avec l'affichage existant (mêmes clés que l'ancienne version 2DDL)
+  detailAtF0.f = f0_dyn;
+  detailAtFref.f = f_ref_dyn;
+  detailAtFref.tfRef = detailAtFref.tfRef; // (déjà présent)
+
   return { 
-    data, f0_dyn, f_ref_dyn, f_passage: f_pass_rounded, f_rugosite: f_rugo_rounded, v_ms,
-    details: { m1, m2, m_rail, m2_beton, m2_top, k1, k2, c1, c2, A_eq, B_eq, C_eq, delta } 
+    data, f0_dyn, f0_modes, f_ref_dyn, f_passage: f_pass_rounded, f_rugosite: f_rugo_rounded, v_ms,
+    details: { m1, m2, m3, m_rail, m3_beton, m3_top, k1, k2, k3, c1, c2, c3 },
+    detailAtF0, detailAtFref
   };
 }
 
 function round2(x) { return Math.round(x * 100) / 100; }
 
 // ─────────────────────────────────────────────────────────────────
+// Calcule les grandeurs intermédiaires (module de K1, K2, termes de la
+// matrice, module du déterminant) pour une fréquence donnée — utilisé
+// pour peupler la table détaillée de l'onglet "Détails".
+// ─────────────────────────────────────────────────────────────────
+function buildDetailRow(f, params, details) {
+  const { k1, k2, k3, c1, c2, c3, m1, m2, m3 } = details;
+  const w = 2 * Math.PI * f;
+
+  const cMul = (a, b) => [a[0]*b[0] - a[1]*b[1], a[0]*b[1] + a[1]*b[0]];
+  const cSub = (a, b) => [a[0]-b[0], a[1]-b[1]];
+  const cAdd = (a, b) => [a[0]+b[0], a[1]+b[1]];
+  const cAbs = (a) => Math.sqrt(a[0]*a[0] + a[1]*a[1]);
+
+  const K1 = [k1, w * c1];
+  const K2 = [k2, w * c2];
+  const K3 = [k3, w * c3];
+  const m1w2 = -m1 * w * w;
+  const m2w2 = -m2 * w * w;
+  const m3w2 = -m3 * w * w;
+
+  const A11 = [m1w2 + K1[0], K1[1]];
+  const A22 = cAdd([m2w2, 0], cAdd(K1, K2));
+  const A33 = cAdd([m3w2, 0], cAdd(K2, K3));
+  const inner = cSub(cMul(A22, A33), cMul(K2, K2));
+  const det = cSub(cMul(A11, inner), cMul(K1, cMul(K1, A33)));
+
+  return {
+    w, K1mag: cAbs(K1), K2mag: cAbs(K2), K3mag: cAbs(K3), m1w2, m2w2, m3w2, detMag: cAbs(det)
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────
 // PRÉRÉGLAGES
 // ─────────────────────────────────────────────────────────────────
 const CALIBRATION = {
   vitesse: 30, lambda_rugo: 50,
-  M_ns: 360, A_rail: 6950, rho_rail: 7.85e-6, m_traverse: 0, a_RS: 650,
-  k_pad: 225, zeta_pad: 0.20, 
+  M_ns: 360, A_rail: 6950, rho_rail: 7.85e-6, a_RS: 650,
+  k_pad: 225, zeta_pad: 0.20,
+  m_traverse: 250,
+  k_semelle_traverse: 80, zeta_semelle_traverse: 0.15,
   h_dalle: 500, b_dalle: 750, rho_beton: 2.5e-6, h_top: 200, rho_top: 1.7e-6,
-  C_MSS: 0.0467, zeta_MSS: 0.20, 
+  C_MSS: 0.0467, zeta_MSS: 0.20,
 };
 
 const PRESETS = {
   'Note de Calcul (Metro 30 km/h)': CALIBRATION,
   'Intercity rapide (120 km/h)': { ...CALIBRATION, vitesse: 120 },
   'Défaut de rugosité court (λ=30mm)': { ...CALIBRATION, lambda_rugo: 30 },
-  'Voie sur blochets (ex: 120 kg)': { ...CALIBRATION, m_traverse: 120 },
+  'Voie sur blochets lourds (ex: 400 kg)': { ...CALIBRATION, m_traverse: 400 },
+  'Sans semelle sous traverse (voie ballastée classique)': { ...CALIBRATION, k_semelle_traverse: 100000, zeta_semelle_traverse: 0.02 },
 };
 
 // ─────────────────────────────────────────────────────────────────
@@ -396,6 +525,33 @@ function FormattedText({ text }) {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Affichage d'un nombre complexe [re, im] formaté "a + bi"
+// ─────────────────────────────────────────────────────────────────
+function ComplexVal({ c, unit = "", digits = 3 }) {
+  const [re, im] = c;
+  const sign = im >= 0 ? '+' : '−';
+  return (
+    <span className="math-val">
+      {re.toExponential(digits)} {sign} {Math.abs(im).toExponential(digits)}<em>i</em>
+      {unit && <span style={{ color: '#94a3b8' }}> {unit}</span>}
+    </span>
+  );
+}
+
+// Petite cellule de matrice 2x2 pour l'affichage visuel
+function MatrixCell({ label, value, bg }) {
+  return (
+    <div style={{
+      background: bg || '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6,
+      padding: '10px 12px', textAlign: 'center', minWidth: 0,
+    }}>
+      <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 700, marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 11.5, fontFamily: "'IBM Plex Mono', monospace", color: '#0f172a', wordBreak: 'break-all' }}>{value}</div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
 // APP PRINCIPALE
 // ─────────────────────────────────────────────────────────────────
 function App() {
@@ -430,20 +586,22 @@ function App() {
   };
 
   const result = useMemo(() => computeCurves(params), [params]);
-  const { data, f0_dyn, f_ref_dyn, f_passage, f_rugosite, details } = result;
+  const { data, f0_dyn, f0_modes, f_ref_dyn, f_passage, f_rugosite, details, detailAtF0, detailAtFref } = result;
 
   const ilAt63 = (data.find(d => d.f === 63) || {}).IL ?? 0;
   const peakSysData = data.find(d => d.f === f0_dyn);
 
   const getSimContext = () => `
-    [DONNÉES DU MODÈLE ACTUEL]
+    [DONNÉES DU MODÈLE ACTUEL — Système à 3 étages]
     - Vitesse : ${params.vitesse} km/h
-    - Masse totale (M1) : ${details.m1.toFixed(0)} kg
-    - Masse Dalle (M2) : ${details.m2.toFixed(0)} kg
-    - Raideur semelle : ${params.k_pad} kN/mm
-    - Module élastomère MSS : ${params.C_MSS} N/mm³
-    - Fréquence propre VDF (f0) : ${f0_dyn} Hz
-    - Fréquence passage traverses : ${f_passage} Hz
+    - Masse rail (M1) : ${details.m1.toFixed(0)} kg
+    - Masse traverse (M2) : ${details.m2.toFixed(0)} kg
+    - Masse dalle (M3) : ${details.m3.toFixed(0)} kg
+    - Raideur rail pad (k1) : ${params.k_pad} kN/mm
+    - Raideur semelle sous traverse (k2) : ${params.k_semelle_traverse} kN/mm
+    - Module tapis/plot MSS (k3) : ${params.C_MSS} N/mm³
+    - Fréquence propre dominante (f0) : ${f0_dyn} Hz
+    - Fréquence passage rail support : ${f_passage} Hz
     - Fréquence usure (rugo) : ${f_rugosite} Hz
     - Atténuation IL à 63 Hz : ${ilAt63.toFixed(1)} dB
     - Amplification (T_sys) à f0 : ${peakSysData?.Tsys.toFixed(1)} dB
@@ -460,21 +618,23 @@ function App() {
         vitesse: { type: "NUMBER", description: "Vitesse km/h (10-320)" },
         M_ns: { type: "NUMBER", description: "Masse non suspendue roue kg (0-1000)" },
         A_rail: { type: "NUMBER", description: "Section rail mm2 (5000-9000)" },
-        m_traverse: { type: "NUMBER", description: "Masse traverse kg (0-400)" },
+        m_traverse: { type: "NUMBER", description: "Masse traverse kg (0-800)" },
         a_RS: { type: "NUMBER", description: "Entraxe fixations mm (500-1000)" },
+        k_pad: { type: "NUMBER", description: "Raideur rail pad kN/mm (50-500)" },
+        zeta_pad: { type: "NUMBER", description: "Amortissement rail pad (0.05-0.4)" },
+        k_semelle_traverse: { type: "NUMBER", description: "Raideur semelle sous traverse kN/mm (5-500)" },
+        zeta_semelle_traverse: { type: "NUMBER", description: "Amortissement semelle sous traverse (0.02-0.4)" },
         h_dalle: { type: "NUMBER", description: "Hauteur dalle béton mm (300-800)" },
         h_top: { type: "NUMBER", description: "Hauteur couche sup mm (0-400)" },
-        k_pad: { type: "NUMBER", description: "Raideur semelle kN/mm (50-500)" },
-        zeta_pad: { type: "NUMBER", description: "Amortissement semelle (0.05-0.4)" },
-        C_MSS: { type: "NUMBER", description: "Module MSS N/mm3 (0.005-0.1)" },
-        zeta_MSS: { type: "NUMBER", description: "Amortissement MSS (0.02-0.4)" },
+        C_MSS: { type: "NUMBER", description: "Module tapis/plot MSS N/mm3 (0.005-0.1)" },
+        zeta_MSS: { type: "NUMBER", description: "Amortissement tapis/plot MSS (0.02-0.4)" },
         lambda_rugo: { type: "NUMBER", description: "Rugosité rail mm (20-150)" },
         explication: { type: "STRING", description: "Courte justification technique de l'ingénieur." }
       },
-      required: ["vitesse", "M_ns", "A_rail", "m_traverse", "a_RS", "h_dalle", "h_top", "k_pad", "zeta_pad", "C_MSS", "zeta_MSS", "lambda_rugo", "explication"]
+      required: ["vitesse", "M_ns", "A_rail", "m_traverse", "a_RS", "k_pad", "zeta_pad", "k_semelle_traverse", "zeta_semelle_traverse", "h_dalle", "h_top", "C_MSS", "zeta_MSS", "lambda_rugo", "explication"]
     };
 
-    const sysInst = "Tu es un ingénieur acousticien. Configure les paramètres physiques d'une VDF selon le prompt du client. Renvoie un JSON.";
+    const sysInst = "Tu es un ingénieur acousticien. Configure les paramètres physiques d'une voie ferrée à 3 étages de suspension (rail/rail-pad, traverse/semelle sous traverse, dalle/tapis-MSS) selon le prompt du client. Renvoie un JSON.";
     const response = await callGeminiAPI(apiKey, designPrompt, sysInst, schema);
     
     if (response) {
@@ -577,8 +737,8 @@ function App() {
       <div className="layout-header">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-            <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, letterSpacing: -0.5 }}>Simulateur Acoustique VDF 4.0</h1>
-            <p style={{ margin: '4px 0 0', fontSize: 12, color: '#cbd5e1' }}>Intelligence Artificielle & Synthèse Vocale Intégrées</p>
+            <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, letterSpacing: -0.5 }}>Simulateur Acoustique & Vibration</h1>
+            <p style={{ margin: '4px 0 0', fontSize: 12, color: '#cbd5e1' }}>.... avec IA</p>
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
             <button className={`tab-btn ${activeTab === 'graphs' ? 'active' : ''}`} onClick={() => setActiveTab('graphs')}>Graphiques</button>
@@ -641,30 +801,36 @@ function App() {
           <Slider label="Vitesse du train (v)" unit="km/h" value={params.vitesse} min={10} max={320} step={5} onChange={update('vitesse')} color="#dc2626" />
           <Slider label="Rugosité du rail (λ)" unit="mm" value={params.lambda_rugo} min={20} max={150} step={5} onChange={update('lambda_rugo')} color="#7c3aed" />
 
-          <h3 style={{ marginTop: 24, fontSize: 13, borderBottom: '1px solid #e2e8f0', paddingBottom: 8, color: '#334155' }}>Superstructure (Rail, Traverses)</h3>
+          <h3 style={{ marginTop: 24, fontSize: 13, borderBottom: '1px solid #e2e8f0', paddingBottom: 8, color: '#334155' }}>① Rail + Rail Pad <span style={{fontWeight:400,color:'#94a3b8'}}>(étage m1 / K1)</span></h3>
           <Slider label="Masse non suspendue (Roue)" unit="kg" value={params.M_ns} min={0} max={1000} step={10} onChange={update('M_ns')} />
           <Slider label="Section du rail (A)" unit="mm²" value={params.A_rail} min={5000} max={9000} step={10} onChange={update('A_rail')} />
-          <Slider label="Masse traverse/blochet" unit="kg" value={params.m_traverse} min={0} max={400} step={10} onChange={update('m_traverse')} />
           <Slider label="Entraxe fixations (a_RS)" unit="mm" value={params.a_RS} min={500} max={1000} step={10} onChange={update('a_RS')} />
+          <Slider label="Raideur rail pad (k1)" unit="kN/mm" value={params.k_pad} min={50} max={500} step={5} onChange={update('k_pad')} />
+          <Slider label="Amort. rail pad (ζ1)" unit="—" value={params.zeta_pad} min={0.05} max={0.4} step={0.01} onChange={update('zeta_pad')} />
 
-          <h3 style={{ marginTop: 24, fontSize: 13, borderBottom: '1px solid #e2e8f0', paddingBottom: 8, color: '#334155' }}>Infrastructure (Dalle & MSS)</h3>
+          <h3 style={{ marginTop: 24, fontSize: 13, borderBottom: '1px solid #e2e8f0', paddingBottom: 8, color: '#334155' }}>② Traverse + Semelle sous traverse <span style={{fontWeight:400,color:'#94a3b8'}}>(étage m2 / K2)</span></h3>
+          <Slider label="Masse traverse/blochet" unit="kg" value={params.m_traverse} min={0} max={800} step={10} onChange={update('m_traverse')} />
+          <Slider label="Raideur semelle sous traverse (k2)" unit="kN/mm" value={params.k_semelle_traverse} min={5} max={500} step={5} onChange={update('k_semelle_traverse')} />
+          <div style={{ fontSize: 10.5, color: '#94a3b8', marginTop: -8, marginBottom: 10 }}>Semelle résiliente sous traverse (USP) — plus souple que le rail pad pour isolation supplémentaire</div>
+          <Slider label="Amort. semelle sous traverse (ζ2)" unit="—" value={params.zeta_semelle_traverse} min={0.02} max={0.4} step={0.01} onChange={update('zeta_semelle_traverse')} />
+
+          <h3 style={{ marginTop: 24, fontSize: 13, borderBottom: '1px solid #e2e8f0', paddingBottom: 8, color: '#334155' }}>③ Dalle + Tapis/Plot (MSS) <span style={{fontWeight:400,color:'#94a3b8'}}>(étage m3 / K3)</span></h3>
           <Slider label="Hauteur dalle béton" unit="mm" value={params.h_dalle} min={300} max={800} step={10} onChange={update('h_dalle')} />
           <Slider label="Hauteur couche sup." unit="mm" value={params.h_top} min={0} max={400} step={10} onChange={update('h_top')} />
-          <Slider label="Raideur semelle (k_pad)" unit="kN/mm" value={params.k_pad} min={50} max={500} step={5} onChange={update('k_pad')} />
-          <Slider label="Amort. semelle (ζ)" unit="—" value={params.zeta_pad} min={0.05} max={0.4} step={0.01} onChange={update('zeta_pad')} />
-          <Slider label="Module MSS effectif" unit="N/mm³" value={params.C_MSS} min={0.005} max={0.1} step={0.001} onChange={update('C_MSS')} formatValue={v => v.toFixed(4)} />
-          <Slider label="Amort. MSS (ζ)" unit="—" value={params.zeta_MSS} min={0.02} max={0.4} step={0.01} onChange={update('zeta_MSS')} />
+          <Slider label="Module tapis/plot (k3, MSS)" unit="N/mm³" value={params.C_MSS} min={0.005} max={0.1} step={0.001} onChange={update('C_MSS')} formatValue={v => v.toFixed(4)} />
+          <Slider label="Amort. tapis/plot (ζ3)" unit="—" value={params.zeta_MSS} min={0.02} max={0.4} step={0.01} onChange={update('zeta_MSS')} />
 
         </div>
 
         <div className="layout-content">
           
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 10, marginBottom: 24 }}>
-            <Stat label="M1 (Voie)" value={details.m1.toFixed(0)} unit="kg" />
-            <Stat label="M2 (Dalle)" value={details.m2.toFixed(0)} unit="kg" />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 10, marginBottom: 24 }}>
+            <Stat label="M1 (Rail)" value={details.m1.toFixed(0)} unit="kg" />
+            <Stat label="M2 (Traverse)" value={details.m2.toFixed(0)} unit="kg" />
+            <Stat label="M3 (Dalle)" value={details.m3.toFixed(0)} unit="kg" />
             <Stat label="Résonance f0" value={f0_dyn} unit="Hz" />
             <Stat label="IL 63Hz" value={ilAt63.toFixed(1)} unit="dB" />
-            <Stat label="Exc. Traverses" value={f_passage} unit="Hz" highlightColor="#dc2626" />
+            <Stat label="Exc. F. Passage" value={f_passage} unit="Hz" highlightColor="#dc2626" />
             <Stat label="Exc. Rugosité" value={f_rugosite > 999 ? ">1k" : f_rugosite} unit="Hz" highlightColor="#7c3aed" />
           </div>
 
@@ -682,7 +848,7 @@ function App() {
                     <ReferenceLine y={0} stroke="#0f172a" strokeWidth={1} opacity={0.2} />
                     
                     {f_passage >= 4 && f_passage <= 250 && (
-                       <ReferenceLine x={f_passage} stroke="#dc2626" strokeDasharray="4 4" label={{ value: 'Traverses', position: 'insideTopLeft', fill: '#dc2626', fontSize: 11, fontWeight: 700 }} />
+                       <ReferenceLine x={f_passage} stroke="#dc2626" strokeDasharray="4 4" label={{ value: 'F. Passage', position: 'insideTopLeft', fill: '#dc2626', fontSize: 11, fontWeight: 700 }} />
                     )}
                     {f_rugosite >= 4 && f_rugosite <= 250 && (
                        <ReferenceLine x={f_rugosite} stroke="#7c3aed" strokeDasharray="4 4" label={{ value: 'Rugosité', position: 'insideBottomRight', fill: '#7c3aed', fontSize: 11, fontWeight: 700 }} />
@@ -705,7 +871,7 @@ function App() {
                     <ReferenceLine y={0} stroke="#0f172a" strokeWidth={1} opacity={0.2} />
 
                     {f_passage >= 4 && f_passage <= 250 && (
-                       <ReferenceLine x={f_passage} stroke="#dc2626" strokeDasharray="4 4" label={{ value: 'Traverses', position: 'insideTopLeft', fill: '#dc2626', fontSize: 11, fontWeight: 700 }} />
+                       <ReferenceLine x={f_passage} stroke="#dc2626" strokeDasharray="4 4" label={{ value: 'F. Passage', position: 'insideTopLeft', fill: '#dc2626', fontSize: 11, fontWeight: 700 }} />
                     )}
                     {f_rugosite >= 4 && f_rugosite <= 250 && (
                        <ReferenceLine x={f_rugosite} stroke="#7c3aed" strokeDasharray="4 4" label={{ value: 'Rugosité', position: 'insideBottomRight', fill: '#7c3aed', fontSize: 11, fontWeight: 700 }} />
@@ -726,7 +892,7 @@ function App() {
                 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 12 }}>
                   <div style={{ padding: 12, background: '#fef2f2', borderRadius: 6, border: '1px solid #fecaca' }}>
-                    <strong style={{ color: '#0f172a', fontSize: 14 }}>Excitation paramétrique (Traverses)</strong>
+                    <strong style={{ color: '#0f172a', fontSize: 14 }}>Excitation paramétrique (Rail support)</strong>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginTop: 10 }}>
                       <div style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", background: '#fff', padding: '6px 12px', border: '1px solid #fecaca', borderRadius: 4 }}>
                         f_passage = v / a_RS
@@ -749,29 +915,220 @@ function App() {
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
                 <div className="card">
-                  <h3 style={{ marginTop: 0, fontSize: 14, borderBottom: '1px solid #e2e8f0', paddingBottom: 8 }}>Vecteur Masse [M]</h3>
+                  <h3 style={{ marginTop: 0, fontSize: 14, borderBottom: '1px solid #e2e8f0', paddingBottom: 8 }}>Vecteur Masse [M] — 3 étages</h3>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                     <div><div className="math-lbl">m1_rail</div><div className="math-val">{details.m_rail.toFixed(2)} kg</div></div>
-                    <div><div className="math-lbl">m1_traverse</div><div className="math-val">{params.m_traverse.toFixed(2)} kg</div></div>
-                    <div><div className="math-lbl">m1_non_susp</div><div className="math-val">{params.M_ns.toFixed(2)} kg</div></div>
-                    <div><div className="math-lbl" style={{color:'#ea580c'}}>Total m1</div><div className="math-val" style={{fontWeight:700}}>{details.m1.toFixed(2)} kg</div></div>
+                    <div><div className="math-lbl">m1_non_susp (roue)</div><div className="math-val">{params.M_ns.toFixed(2)} kg</div></div>
+                    <div></div>
+                    <div><div className="math-lbl" style={{color:'#ea580c'}}>Total m1 (rail)</div><div className="math-val" style={{fontWeight:700}}>{details.m1.toFixed(2)} kg</div></div>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12, paddingTop: 12, borderTop: '1px solid #f1f5f9' }}>
-                    <div><div className="math-lbl">m2_béton</div><div className="math-val">{details.m2_beton.toFixed(2)} kg</div></div>
-                    <div><div className="math-lbl">m2_top</div><div className="math-val">{details.m2_top.toFixed(2)} kg</div></div>
+                    <div><div className="math-lbl">m2_traverse/blochet</div><div className="math-val">{details.m2.toFixed(2)} kg</div></div>
                     <div></div>
-                    <div><div className="math-lbl" style={{color:'#ea580c'}}>Total m2</div><div className="math-val" style={{fontWeight:700}}>{details.m2.toFixed(2)} kg</div></div>
+                    <div></div>
+                    <div><div className="math-lbl" style={{color:'#ea580c'}}>Total m2 (traverse)</div><div className="math-val" style={{fontWeight:700}}>{details.m2.toFixed(2)} kg</div></div>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12, paddingTop: 12, borderTop: '1px solid #f1f5f9' }}>
+                    <div><div className="math-lbl">m3_béton (dalle)</div><div className="math-val">{details.m3_beton.toFixed(2)} kg</div></div>
+                    <div><div className="math-lbl">m3_top (couche sup.)</div><div className="math-val">{details.m3_top.toFixed(2)} kg</div></div>
+                    <div></div>
+                    <div><div className="math-lbl" style={{color:'#ea580c'}}>Total m3 (dalle)</div><div className="math-val" style={{fontWeight:700}}>{details.m3.toFixed(2)} kg</div></div>
                   </div>
                 </div>
 
                 <div className="card">
-                  <h3 style={{ marginTop: 0, fontSize: 14, borderBottom: '1px solid #e2e8f0', paddingBottom: 8 }}>Impédances [K] & [C]</h3>
+                  <h3 style={{ marginTop: 0, fontSize: 14, borderBottom: '1px solid #e2e8f0', paddingBottom: 8 }}>Impédances [K] & [C] — 3 étages</h3>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span className="math-lbl">Raideur k1 (Semelle)</span><span className="math-val">{(details.k1).toExponential(3)} N/m</span></div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span className="math-lbl">Amort. c1</span><span className="math-val">{(details.c1).toExponential(3)} N.s/m</span></div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 12 }}><span className="math-lbl">Raideur k2 (MSS)</span><span className="math-val">{(details.k2).toExponential(3)} N/m</span></div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span className="math-lbl">Amort. c2</span><span className="math-val">{(details.c2).toExponential(3)} N.s/m</span></div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span className="math-lbl">k1 — Rail pad</span><span className="math-val">{(details.k1).toExponential(3)} N/m</span></div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span className="math-lbl">c1 — Amort. rail pad</span><span className="math-val">{(details.c1).toExponential(3)} N.s/m</span></div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 12 }}><span className="math-lbl">k2 — Semelle sous traverse</span><span className="math-val">{(details.k2).toExponential(3)} N/m</span></div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span className="math-lbl">c2 — Amort. semelle traverse</span><span className="math-val">{(details.c2).toExponential(3)} N.s/m</span></div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 12 }}><span className="math-lbl">k3 — Tapis/plot (MSS)</span><span className="math-val">{(details.k3).toExponential(3)} N/m</span></div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span className="math-lbl">c3 — Amort. tapis/plot</span><span className="math-val">{(details.c3).toExponential(3)} N.s/m</span></div>
                   </div>
+                  {f0_modes && f0_modes.length > 0 && (
+                    <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #f1f5f9' }}>
+                      <div className="math-lbl" style={{ marginBottom: 6 }}>Fréquences propres du système (3 modes)</div>
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {f0_modes.map((fm, i) => (
+                          <span key={i} style={{
+                            fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 700,
+                            background: i === 0 ? '#fff7ed' : '#f8fafc', color: i === 0 ? '#c2410c' : '#475569',
+                            border: `1px solid ${i === 0 ? '#fed7aa' : '#e2e8f0'}`, borderRadius: 6, padding: '4px 10px'
+                          }}>
+                            f{i+1} = {fm} Hz
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* ═══════════════════════════════════════════════════════════
+                  CALCUL DÉTAILLÉ ET MATRICE — dérivation pas-à-pas de T_sys et T_ref
+                  ═══════════════════════════════════════════════════════════ */}
+              <div className="card">
+                <h3 style={{ marginTop: 0, fontSize: 15, borderBottom: '1px solid #e2e8f0', paddingBottom: 8, color: '#0f172a' }}>
+                  📐 Calcul détaillé — Matrice du système à 3 étages et fonctions de transfert
+                </h3>
+
+                <div style={{ fontSize: 12.5, color: '#475569', lineHeight: 1.6, marginBottom: 18 }}>
+                  Le rail (masse m1) est excité par une force harmonique unitaire et repose sur le <strong>rail pad</strong> (k1/c1).
+                  Le rail pad transmet l'effort à la <strong>traverse</strong> (masse m2), elle-même portée par la <strong>semelle
+                  sous traverse</strong> (k2/c2). La semelle transmet à son tour l'effort à la <strong>dalle</strong> (masse m3),
+                  posée sur le <strong>tapis/plot élastomère</strong> (k3/c3, MSS) qui repose enfin sur le radier fixe.
+                  <strong> T_sys</strong> est le rapport entre la force transmise au radier à travers les 3 étages en série
+                  et la force appliquée sur le rail. <strong>T_ref</strong> reste le cas de référence où le rail repose
+                  <em> directement</em> sur un radier infiniment rigide via le rail pad seul (sans traverse, semelle, dalle ni tapis).
+                </div>
+
+                {/* Schéma topologique à 3 étages */}
+                <div style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  background: '#f8fafc', border: '1px dashed #cbd5e1', borderRadius: 8,
+                  padding: '16px 10px', marginBottom: 20, fontSize: 11.5, fontFamily: "'IBM Plex Mono', monospace",
+                  flexWrap: 'wrap', color: '#334155'
+                }}>
+                  <span style={{ background: '#fee2e2', border: '1px solid #fecaca', borderRadius: 6, padding: '6px 10px', fontWeight: 700 }}>F(t) → m1 (rail)</span>
+                  <span style={{ color: '#94a3b8' }}>──[k1,c1]<br/>rail pad──</span>
+                  <span style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 6, padding: '6px 10px', fontWeight: 700 }}>m2 (traverse)</span>
+                  <span style={{ color: '#94a3b8' }}>──[k2,c2]<br/>semelle──</span>
+                  <span style={{ background: '#dbeafe', border: '1px solid #bfdbfe', borderRadius: 6, padding: '6px 10px', fontWeight: 700 }}>m3 (dalle)</span>
+                  <span style={{ color: '#94a3b8' }}>──[k3,c3]<br/>tapis/MSS──</span>
+                  <span style={{ background: '#e2e8f0', border: '1px solid #cbd5e1', borderRadius: 6, padding: '6px 10px', fontWeight: 700 }}>⏚ Radier fixe</span>
+                </div>
+
+                {/* Équations du mouvement */}
+                <h4 style={{ fontSize: 13, color: '#0f172a', marginBottom: 8 }}>1. Équations du mouvement (PFD sur chaque masse)</h4>
+                <div style={{ background: '#0f172a', color: '#e2e8f0', borderRadius: 8, padding: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, lineHeight: 1.9, marginBottom: 20, overflowX: 'auto' }}>
+                  <div>m1·ẍ1 + k1·(x1−x2) + c1·(ẋ1−ẋ2) = F(t)                          <span style={{color:'#94a3b8'}}>// rail</span></div>
+                  <div>m2·ẍ2 + k2·(x2−x3) + c2·(ẋ2−ẋ3) − k1·(x1−x2) − c1·(ẋ1−ẋ2) = 0    <span style={{color:'#94a3b8'}}>// traverse</span></div>
+                  <div>m3·ẍ3 + k3·x3 + c3·ẋ3 − k2·(x2−x3) − c2·(ẋ2−ẋ3) = 0              <span style={{color:'#94a3b8'}}>// dalle</span></div>
+                </div>
+
+                {/* Passage au régime harmonique */}
+                <h4 style={{ fontSize: 13, color: '#0f172a', marginBottom: 8 }}>2. Régime harmonique — notation complexe (x = X·e^(jωt))</h4>
+                <div style={{ fontSize: 12.5, color: '#475569', marginBottom: 10 }}>
+                  On pose les impédances complexes <strong>K1 = k1+jωc1</strong>, <strong>K2 = k2+jωc2</strong>,
+                  <strong> K3 = k3+jωc3</strong>. Le système se met sous forme matricielle <strong>[A]·{'{X}'} = {'{F}'}</strong> (matrice 3×3, tridiagonale) :
+                </div>
+                <div style={{ background: '#0f172a', color: '#e2e8f0', borderRadius: 8, padding: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, lineHeight: 1.9, marginBottom: 20, overflowX: 'auto' }}>
+                  <div>[ −m1ω²+K1      −K1            0        ]   [X1]   [F0]</div>
+                  <div>[   −K1     −m2ω²+K1+K2      −K2        ] · [X2] = [0 ]</div>
+                  <div>[    0          −K2        −m3ω²+K2+K3  ]   [X3]   [0 ]</div>
+                </div>
+
+                {/* Matrice numérique à f0_dyn */}
+                <h4 style={{ fontSize: 13, color: '#0f172a', marginBottom: 8 }}>
+                  3. Application numérique au mode dominant (f₀ = {f0_dyn} Hz, ω = {detailAtF0.w.toFixed(2)} rad/s)
+                </h4>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 10 }}>
+                  <MatrixCell label="K1 = k1+jωc1 (rail pad)" value={<ComplexVal c={detailAtF0.k1c} unit="N/m" />} bg="#fef2f2" />
+                  <MatrixCell label="K2 = k2+jωc2 (semelle trav.)" value={<ComplexVal c={detailAtF0.k2c} unit="N/m" />} bg="#fffbeb" />
+                  <MatrixCell label="K3 = k3+jωc3 (tapis/MSS)" value={<ComplexVal c={detailAtF0.k3c} unit="N/m" />} bg="#eff6ff" />
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 14 }}>
+                  <MatrixCell label="−m1ω²" value={<span className="math-val">{detailAtF0.m1c[0].toExponential(3)}</span>} />
+                  <MatrixCell label="−m2ω²" value={<span className="math-val">{detailAtF0.m2c[0].toExponential(3)}</span>} />
+                  <MatrixCell label="−m3ω²" value={<span className="math-val">{detailAtF0.m3c[0].toExponential(3)}</span>} />
+                </div>
+
+                <div className="math-lbl" style={{ marginBottom: 6 }}>Matrice [A] — diagonale et couplages (termes non nuls)</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 16 }}>
+                  <MatrixCell label="A11 = −m1ω²+K1" value={<ComplexVal c={detailAtF0.A11} />} bg="#fef2f2" />
+                  <MatrixCell label="A22 = −m2ω²+K1+K2" value={<ComplexVal c={detailAtF0.A22} />} bg="#fffbeb" />
+                  <MatrixCell label="A33 = −m3ω²+K2+K3" value={<ComplexVal c={detailAtF0.A33} />} bg="#eff6ff" />
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+                  <MatrixCell label="Terme intermédiaire: A22·A33 − K2²" value={<ComplexVal c={detailAtF0.inner} />} bg="#f0fdf4" />
+                  <MatrixCell label="det[A] = A11·(A22·A33−K2²) − K1²·A33" value={<ComplexVal c={detailAtF0.detSys} />} bg="#f0fdf4" />
+                </div>
+                <MatrixCell label="Numérateur T_sys = K1·K2·K3" value={<ComplexVal c={detailAtF0.numSys} />} bg="#f0fdf4" />
+
+                {/* Résultats finaux T_sys et T_ref */}
+                <h4 style={{ fontSize: 13, color: '#0f172a', marginBottom: 8, marginTop: 20 }}>4. Fonctions de transfert résultantes</h4>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                  <div style={{ padding: 14, background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 8 }}>
+                    <div style={{ fontWeight: 700, color: '#c2410c', fontSize: 13, marginBottom: 8 }}>T_sys (Système à 3 étages, à f₀ = {f0_dyn} Hz)</div>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: '#7c2d12', marginBottom: 8 }}>
+                      T_sys = K1·K2·K3 / det[A]
+                    </div>
+                    <div className="math-val" style={{ fontSize: 11.5, wordBreak: 'break-all' }}>
+                      = <ComplexVal c={detailAtF0.numSys} /> / <ComplexVal c={detailAtF0.detSys} />
+                    </div>
+                    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #fed7aa', display: 'flex', justifyContent: 'space-between' }}>
+                      <span className="math-lbl">|T_sys|</span>
+                      <span className="math-val" style={{ fontWeight: 700 }}>{detailAtF0.tfSysMag.toExponential(4)}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span className="math-lbl">T_sys en dB = 20·log₁₀|T_sys|</span>
+                      <span className="math-val" style={{ fontWeight: 700, color: '#c2410c' }}>{detailAtF0.tfSysDb.toFixed(2)} dB</span>
+                    </div>
+                  </div>
+
+                  <div style={{ padding: 14, background: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: 8 }}>
+                    <div style={{ fontWeight: 700, color: '#475569', fontSize: 13, marginBottom: 8 }}>T_ref (Rail pad seul, à f = {f_ref_dyn} Hz)</div>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: '#334155', marginBottom: 8 }}>
+                      T_ref = K1 / (−m1ω² + K1)
+                    </div>
+                    <div className="math-val" style={{ fontSize: 12 }}>
+                      = <ComplexVal c={detailAtFref.k1c} /> / <ComplexVal c={detailAtFref.termRef} />
+                    </div>
+                    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #cbd5e1', display: 'flex', justifyContent: 'space-between' }}>
+                      <span className="math-lbl">|T_ref|</span>
+                      <span className="math-val" style={{ fontWeight: 700 }}>{detailAtFref.tfRefMag.toExponential(4)}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span className="math-lbl">T_ref en dB = 20·log₁₀|T_ref|</span>
+                      <span className="math-val" style={{ fontWeight: 700, color: '#475569' }}>{detailAtFref.tfRefDb.toFixed(2)} dB</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 16, padding: 12, background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, fontSize: 12, color: '#1e40af', lineHeight: 1.6 }}>
+                  <strong>Note :</strong> le système possède désormais <strong>3 fréquences propres</strong> (voir carte "Impédances"
+                  ci-dessus) au lieu d'une seule pour le modèle à 2 étages — chaque étage de suspension ajoute un mode.
+                  T_sys et T_ref sont recalculés à chaque fréquence du spectre (4 à 250 Hz) selon exactement les mêmes
+                  formules — seules ω, K1(ω), K2(ω) et K3(ω) changent. La perte par insertion tracée dans l'onglet
+                  Graphiques est <strong>IL(f) = 20·log₁₀|T_ref(f)| − 20·log₁₀|T_sys(f)|</strong> pour chaque fréquence du tableau.
+                </div>
+
+                {/* Tableau complet des valeurs intermédiaires pour toutes les fréquences */}
+                <h4 style={{ fontSize: 13, color: '#0f172a', marginBottom: 8, marginTop: 24 }}>5. Table complète des valeurs intermédiaires (toutes fréquences)</h4>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10.5, fontFamily: "'IBM Plex Mono', monospace" }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1.5px solid #e2e8f0', background: '#f8fafc' }}>
+                        {['f (Hz)', 'ω (rad/s)', '|K1|', '|K2|', '|K3|', '−m1ω²', '−m2ω²', '−m3ω²', '|det[A]|', 'T_sys (dB)', 'T_ref (dB)', 'IL (dB)'].map(h => (
+                          <th key={h} style={{ textAlign: 'right', padding: '6px 6px', color: '#64748b', fontWeight: 700, whiteSpace: 'nowrap' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.map((d, i) => {
+                        const det = buildDetailRow(d.f, params, details);
+                        const isMode = f0_modes && f0_modes.includes(d.f);
+                        return (
+                          <tr key={i} style={{ borderBottom: '1px solid #f1f5f9', background: isMode ? '#fff7ed' : 'transparent' }}>
+                            <td style={{ textAlign: 'right', padding: '4px 6px', fontWeight: 700 }}>{d.f}</td>
+                            <td style={{ textAlign: 'right', padding: '4px 6px', color: '#64748b' }}>{det.w.toFixed(1)}</td>
+                            <td style={{ textAlign: 'right', padding: '4px 6px' }}>{det.K1mag.toExponential(2)}</td>
+                            <td style={{ textAlign: 'right', padding: '4px 6px' }}>{det.K2mag.toExponential(2)}</td>
+                            <td style={{ textAlign: 'right', padding: '4px 6px' }}>{det.K3mag.toExponential(2)}</td>
+                            <td style={{ textAlign: 'right', padding: '4px 6px', color: '#94a3b8' }}>{det.m1w2.toExponential(2)}</td>
+                            <td style={{ textAlign: 'right', padding: '4px 6px', color: '#94a3b8' }}>{det.m2w2.toExponential(2)}</td>
+                            <td style={{ textAlign: 'right', padding: '4px 6px', color: '#94a3b8' }}>{det.m3w2.toExponential(2)}</td>
+                            <td style={{ textAlign: 'right', padding: '4px 6px', color: '#94a3b8' }}>{det.detMag.toExponential(2)}</td>
+                            <td style={{ textAlign: 'right', padding: '4px 6px', color: '#c2410c', fontWeight: 600 }}>{d.Tsys.toFixed(2)}</td>
+                            <td style={{ textAlign: 'right', padding: '4px 6px', color: '#64748b' }}>{d.Tref.toFixed(2)}</td>
+                            <td style={{ textAlign: 'right', padding: '4px 6px', color: d.IL < 0 ? '#dc2626' : '#059669', fontWeight: 700 }}>{d.IL.toFixed(2)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               </div>
 
