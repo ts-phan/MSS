@@ -1,0 +1,32 @@
+{
+  "name": "Simulateur Système Masse-Ressort — Voie Ferrée",
+  "short_name": "VDF Simulateur",
+  "description": "Simulateur interactif de fonction de transfert vibratoire et de perte par insertion pour voie ferrée sur dalle flottante (rail, traverse, dalle, tapis MSS).",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#1a1d20",
+  "theme_color": "#1a1d20",
+  "lang": "fr",
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
